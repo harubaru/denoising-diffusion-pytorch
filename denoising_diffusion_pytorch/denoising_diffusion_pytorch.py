@@ -21,6 +21,10 @@ from einops.layers.torch import Rearrange
 
 from ema_pytorch import EMA
 
+# accelerate
+from accelerate import Accelerator
+accelerator = Accelerator()
+
 # helpers functions
 
 def exists(x):
@@ -596,9 +600,11 @@ class Trainer(object):
         augment_horizontal_flip = True
     ):
         super().__init__()
+        self.device = accelerator.device
+        diffusion_model.to(self.device)
+        
         self.image_size = diffusion_model.image_size
 
-        self.model = diffusion_model
         self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
 
         self.step_start_ema = step_start_ema
@@ -610,8 +616,12 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
 
         self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip)
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count()))
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr)
+        
+        self.model, self.dl, self.opt = accelerate.prepare(
+            diffusion_model,
+            cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())),
+            Adam(diffusion_model.parameters(), lr = train_lr)
+        )
 
         self.step = 0
 
@@ -647,7 +657,8 @@ class Trainer(object):
 
                     with autocast(enabled = self.amp):
                         loss = self.model(data)
-                        self.scaler.scale(loss / self.gradient_accumulate_every).backward()
+                        loss = self.scaler.scale(loss / self.gradient_accumulate_every)
+                        accelerator.backward(loss)
 
                     pbar.set_description(f'loss: {loss.item():.4f}')
 
